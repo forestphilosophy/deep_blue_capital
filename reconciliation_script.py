@@ -11,6 +11,9 @@ import logging
 import calendar
 from pandas.api.types import is_string_dtype
 from pandas.api.types import is_numeric_dtype
+import dbc.html_style
+import importlib.resources as pkg_resources
+
 
 pd.options.mode.chained_assignment = None
 
@@ -115,7 +118,44 @@ def get_expired_isin(syd):
         isin = cursor.fetchall()[0][0]
         
     return isin
+
+def get_price(param_date,param_identifier,source='baml'):
     
+    if source == 'baml':
+        query = "select price from baml.smi_positions where price_date = %s and security_name = %s;"
+        param_1,param_2 = param_date,param_identifier
+        
+    elif source == 'core':
+        query = "SELECT price_close FROM core.historical_end_of_day_prices \
+        WHERE syd in (SELECT syd FROM core.listings_all t1 \
+        LEFT JOIN core.historical_companies using(security_id) LEFT JOIN core.historical_isins using(security_id) \
+        WHERE isin = %s) AND date = %s;"
+        param_1,param_2 = param_identifier,param_date
+        
+    with psql.connect() as cnx:
+        cursor = cnx.cursor()
+        cursor.execute(query,(param_1,param_2,))
+
+        price = float(cursor.fetchall()[0][0])
+        
+    return price
+
+def get_futures_price(param_date,param_identifier):
+    
+
+    query = "SELECT price_close FROM core.historical_end_of_day_prices \
+    WHERE syd in (SELECT syd FROM core.listings_all t1 \
+    LEFT JOIN core.historical_companies using(security_id) LEFT JOIN core.historical_isins using(security_id) \
+    WHERE bloomberg_id = %s) AND date = %s;"
+        
+    with psql.connect() as cnx:
+        cursor = cnx.cursor()
+        cursor.execute(query,(param_identifier,param_date,))
+
+        price = float(cursor.fetchall()[0][0])
+        
+    return price
+
 def get_fx_rates(date_str,ccy_list):
         
     """
@@ -466,11 +506,42 @@ def make_styler_dict(df):
     return d_out
 
 def get_stylesheet():
-    with open('/mnt/production-read/jimmy_stuff/recon_stylesheet.css','r') as fo:
-        stylesheet = fo.read()  
+
+    with pkg_resources.open_text(dbc.html_style,'dbc_email.css') as fo:
+        stylesheet = fo.read()
+        attrs = stylesheet.split('\n')
+        
+        idx_to_insert = attrs.index('.table-fill {')
+        attrs.insert(idx_to_insert+1, '  width: 1100px;')
+        
+        sub_string = '  max-width: 800px;'
+        idx_to_remove = get_index_positions(attrs,sub_string)[1]
+        del attrs[idx_to_remove]
+        
+        sub_string = '  width: 100%;'
+        idx_to_remove = get_index_positions(attrs,sub_string)[1]
+        del attrs[idx_to_remove]
+        
+        stylesheet = "\n".join(attrs)
     
     return stylesheet
-        
+
+def get_index_positions(list_of_elems, element):
+    ''' Returns the indexes of all occurrences of give element in
+    the list- listOfElements '''
+    index_pos_list = []
+    index_pos = 0
+    while True:
+        try:
+            # Search for item in list from indexPos to the end of list
+            index_pos = list_of_elems.index(element, index_pos)
+            # Add the index position in list
+            index_pos_list.append(index_pos)
+            index_pos += 1
+        except ValueError as e:
+            break
+    return index_pos_list
+
 def output_html_file(html_to_output,titles):
     
     final_html = ''
@@ -722,6 +793,31 @@ def append_yesterday_position_futures(df,futures_baml_prev,futures_core_prev):
     df = df.reindex(column_order,axis=1) 
     return df.set_index('bb')
 
+
+def get_mkt_vals(diffs_at_t,date_str,equity_type='ST'):
+    
+    if equity_type == 'ST':
+        col_name = 'stock_name'
+    
+        for security_name in diffs_at_t[col_name]:
+            if diffs_at_t.loc[diffs_at_t[col_name] == security_name, 'stock_ticker'].values[0] != '':
+                isin = diffs_at_t.index[diffs_at_t[col_name]==security_name].tolist()[0]
+                prc = get_price(date_str,isin,source='core')
+            else:    
+                prc = get_price(date_str,security_name)
+                
+            delta_eur = diffs_at_t.loc[diffs_at_t[col_name] == security_name, 'delta (EUR)'] * prc   
+            diffs_at_t.loc[diffs_at_t[col_name] == security_name, 'delta (EUR)'] = delta_eur
+    
+    else:
+        for security_name in diffs_at_t.index.tolist():   
+            prc = get_futures_price(date_str,security_name)
+                    
+            delta_eur = diffs_at_t.loc[diffs_at_t.index == security_name, 'delta (EUR)'] * prc   
+            diffs_at_t.loc[diffs_at_t.index == security_name, 'delta (EUR)'] = delta_eur   
+    
+    return diffs_at_t
+
 def output_differences(equity_type, date_str):
     
     date_dt = datetime.strptime(date_str, '%Y-%m-%d')
@@ -754,11 +850,13 @@ def output_differences(equity_type, date_str):
         
         if not diffs_at_t.empty:
             diffs_at_t = append_yesterday_position(diffs_at_t,stocks_baml_prev,stocks_core_prev)
-        
+            diffs_at_t = get_mkt_vals(diffs_at_t,date_str)
+            
         if not stock_differences_in_t_but_not_t_minus_1.empty:
             stock_differences_in_t_but_not_t_minus_1 = append_yesterday_position\
         (stock_differences_in_t_but_not_t_minus_1,stocks_baml_prev,stocks_core_prev)
-        
+            stock_differences_in_t_but_not_t_minus_1 = get_mkt_vals(stock_differences_in_t_but_not_t_minus_1,date_str)
+            
         return diffs_at_t, stock_differences_in_t_but_not_t_minus_1
     
     elif equity_type == 'FU':
@@ -771,11 +869,13 @@ def output_differences(equity_type, date_str):
         
         if not diffs_at_t.empty:
             diffs_at_t = append_yesterday_position_futures(diffs_at_t,futures_baml_prev,futures_core_prev)
+            diffs_at_t = get_mkt_vals(diffs_at_t,date_str,equity_type='FU')
             
         if not futures_differences_in_t_but_not_t_minus_1.empty:
             futures_differences_in_t_but_not_t_minus_1 = append_yesterday_position_futures\
         (futures_differences_in_t_but_not_t_minus_1,futures_baml_prev,futures_core_prev)
-        
+            futures_differences_in_t_but_not_t_minus_1 = get_mkt_vals(futures_differences_in_t_but_not_t_minus_1,date_str,equity_type='FU')
+            
         return diffs_at_t,futures_differences_in_t_but_not_t_minus_1
     
 def main():
