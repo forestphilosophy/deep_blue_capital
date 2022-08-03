@@ -119,22 +119,32 @@ def get_expired_isin(syd):
         
     return isin
 
-def get_price(param_date,param_identifier,source='baml'):
+def get_price(param_date,param_identifier,source='baml',expired_ticker=False):
     
     if source == 'baml':
         query = "select price from baml.smi_positions where price_date = %s and security_name = %s;"
         param_1,param_2 = param_date,param_identifier
         
     elif source == 'core':
-        query = "SELECT price_close FROM core.historical_end_of_day_prices \
-        WHERE syd in (SELECT syd FROM core.listings_all t1 \
-        LEFT JOIN core.historical_companies using(security_id) LEFT JOIN core.historical_isins using(security_id) \
-        WHERE isin = %s) AND date = %s;"
+        if expired_ticker == True:
+            query = "SELECT price_close FROM core.historical_end_of_day_prices \
+            WHERE syd in (SELECT syd FROM core.listings_all t1 \
+            LEFT JOIN core.historical_companies using(security_id) LEFT JOIN core.historical_isins using(security_id) \
+            WHERE isin = %s) ORDER By date desc LIMIT 1;"
+            param = param_identifier
+        else:
+            query = "SELECT price_close FROM core.historical_end_of_day_prices \
+            WHERE syd in (SELECT syd FROM core.listings_all t1 \
+            LEFT JOIN core.historical_companies using(security_id) LEFT JOIN core.historical_isins using(security_id) \
+            WHERE isin = %s) AND date = %s;"
         param_1,param_2 = param_identifier,param_date
         
     with psql.connect() as cnx:
         cursor = cnx.cursor()
-        cursor.execute(query,(param_1,param_2,))
+        if expired_ticker == True:
+            cursor.execute(query,(param,))
+        else:
+            cursor.execute(query,(param_1,param_2,))
 
         price = float(cursor.fetchall()[0][0])
         
@@ -311,7 +321,7 @@ def remove_expired_isin_positions(df_baml,df_core):
     
     return df_baml
 
-def comparison(date_str,equity_type):
+def comparison(date_dt,equity_type):
     
     """
     INPUT:
@@ -325,8 +335,8 @@ def comparison(date_str,equity_type):
     """
 
     t = time(hour=23, minute=00)
-    date_str = datetime.combine(date_str, t)
-    date_str = date_str.strftime('%Y-%m-%d %H:%M:%S')
+    date_dt = datetime.combine(date_dt, t)
+    date_str = date_dt.strftime('%Y-%m-%d %H:%M:%S')
                  
     stocks_core,futures_core = core_df(date_str)
     stocks_baml,futures_baml = baml_df(date_str)
@@ -582,7 +592,7 @@ def get_diffs(date_dt,equity_type):
         extra_table = get_table_where_isin_ccy_different(stocks_comparison)
         extra_table = extra_table[~((extra_table['only_in_baml']== 1) & (extra_table['only_in_core'] == 1))]
         stocks_comparison = pd.concat([extra_table, stocks_comparison]).drop_duplicates(keep=False)
-        stocks_comparison = stocks_comparison[~stocks_comparison['stock_ticker'].str.contains("-exp_")] # removing expired tikcers
+
         return stocks_comparison
     
     elif equity_type == 'FU':
@@ -802,7 +812,11 @@ def get_mkt_vals(diffs_at_t,date_str,equity_type='ST'):
         for security_name in diffs_at_t[col_name]:
             if diffs_at_t.loc[diffs_at_t[col_name] == security_name, 'stock_ticker'].values[0] != '':
                 isin = diffs_at_t.index[diffs_at_t[col_name]==security_name].tolist()[0]
-                prc = get_price(date_str,isin,source='core')
+
+                if '-exp_' in diffs_at_t.loc[diffs_at_t[col_name] == security_name, 'stock_ticker'].values[0]:
+                    prc = get_price(date_str,isin,source='core',expired_ticker=True)
+                else:
+                    prc = get_price(date_str,isin,source='core',expired_ticker=False)
             else:    
                 prc = get_price(date_str,security_name)
                 
